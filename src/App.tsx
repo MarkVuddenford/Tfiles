@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useStore, startNPCMessages } from './store';
+import { useStore, startNPCMessages, effectiveBannedUntil } from './store';
 import Login from './components/Login';
 import AdminPanel from './components/AdminPanel';
 import Tavern from './components/Tavern';
@@ -9,13 +9,18 @@ import Orders from './components/Orders';
 import './App.css';
 
 export default function App() {
-  const { currentUser, activeSection, setActiveSection, logout } = useStore(
-    useShallow(s => ({
-      currentUser: s.currentUser,
-      activeSection: s.activeSection,
-      setActiveSection: s.setActiveSection,
-      logout: s.logout,
-    }))
+  const { currentUser, activeSection, setActiveSection, logout, serverMetaForUser } = useStore(
+    useShallow(s => {
+      const u = s.currentUser;
+      const peek = u ? s.serverAccountMeta[u.id] : undefined;
+      return {
+        currentUser: s.currentUser,
+        activeSection: s.activeSection,
+        setActiveSection: s.setActiveSection,
+        logout: s.logout,
+        serverMetaForUser: peek,
+      };
+    })
   );
   const [isAdmin, setIsAdmin] = useState(false);
   const [nowTs, setNowTs] = useState(Date.now());
@@ -24,12 +29,13 @@ export default function App() {
     startNPCMessages();
   }, []);
 
+  const banUntilEff = currentUser ? effectiveBannedUntil(currentUser.id) : 0;
+
   useEffect(() => {
-    if (!currentUser?.bannedUntil) return;
-    if (currentUser.bannedUntil <= Date.now()) return;
+    if (banUntilEff <= Date.now()) return;
     const t = setInterval(() => setNowTs(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [currentUser?.bannedUntil]);
+  }, [banUntilEff]);
 
   useEffect(() => {
     const checkStaleSession = () => {
@@ -76,7 +82,7 @@ export default function App() {
     return <Login onAdminLogin={() => setIsAdmin(true)} />;
   }
 
-  const banLeft = Math.max(0, (currentUser.bannedUntil ?? 0) - nowTs);
+  const banLeft = Math.max(0, banUntilEff - nowTs);
   if (banLeft > 0) {
     const hh = String(Math.floor(banLeft / 3_600_000)).padStart(2, '0');
     const mm = String(Math.floor((banLeft % 3_600_000) / 60_000)).padStart(2, '0');
@@ -88,9 +94,9 @@ export default function App() {
           <p className="bio-text" style={{ marginBottom: 12 }}>
             Доступ к аккаунту ограничен.
           </p>
-          {currentUser.banReason ? (
+          {(serverMetaForUser?.banReason ?? currentUser.banReason) ? (
             <p className="bio-text" style={{ marginBottom: 14 }}>
-              Причина: {currentUser.banReason}
+              Причина: {serverMetaForUser?.banReason ?? currentUser.banReason}
             </p>
           ) : null}
           <div className="admin-msg" style={{ fontSize: 16 }}>
