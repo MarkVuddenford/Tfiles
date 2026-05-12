@@ -5,6 +5,7 @@ import {
   applyRemoteChannelClear,
   applyRemoteFriendRequestStatus,
   applyRemoteModeration,
+  applyRemoteNpcBotConfig,
   applyRemoteSentMessagesCount,
   applyRemoteOrderAccept,
   applyRemoteOrderComplete,
@@ -12,9 +13,12 @@ import {
   appendRemoteProfileReaction,
   mergeRemoteFriendRequests,
   mergeRemoteMessages,
+  registerWsSend,
   replaceRemoteOrders,
   replaceRemoteProfileReactions,
-  registerWsSend,
+  replaceServerAccountMeta,
+  setNpcPausedForWs,
+  type Account,
   type Order,
   type ChatMessage,
   type FriendRequest,
@@ -38,6 +42,8 @@ export function initChatSync() {
   if (typeof window === 'undefined') return;
 
   const url = resolveWsUrl();
+  /** До установления WS не даём каждому клиенту генерировать своих NPC. */
+  if (url) setNpcPausedForWs(true);
 
   // Если есть WS, он уже авторитетный источник синхронизации между вкладками/клиентами.
   // Дублирующая sync через storage может вызывать шторм ререндеров.
@@ -71,6 +77,7 @@ export function initChatSync() {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      setNpcPausedForWs(true);
       registerWsSend((payload) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(payload));
@@ -82,6 +89,23 @@ export function initChatSync() {
       try {
         const data = JSON.parse(String(ev.data));
         if (data.type === 'snapshot') {
+          if (data.npcBot && typeof data.npcBot === 'object') {
+            applyRemoteNpcBotConfig(
+              data.npcBot as Partial<{
+                npcBotEnabled: boolean;
+                npcIntervalMinMs: number;
+                npcIntervalMaxMs: number;
+              }>
+            );
+          }
+          if (data.accountPatches && typeof data.accountPatches === 'object') {
+            replaceServerAccountMeta(
+              data.accountPatches as Record<
+                string,
+                Partial<Pick<Account, 'sentMessagesCount' | 'mutedUntil' | 'bannedUntil' | 'banReason'>>
+              >
+            );
+          }
           if (Array.isArray(data.messages)) {
             mergeRemoteMessages(data.messages as ChatMessage[]);
           }
@@ -140,6 +164,12 @@ export function initChatSync() {
           typeof data.patch === 'object'
         ) {
           applyRemoteModeration(data.userId, data.patch as { mutedUntil?: number; bannedUntil?: number; banReason?: string });
+        } else if (data.type === 'npc-bot-config') {
+          applyRemoteNpcBotConfig({
+            npcBotEnabled: data.npcBotEnabled,
+            npcIntervalMinMs: data.npcIntervalMinMs,
+            npcIntervalMaxMs: data.npcIntervalMaxMs,
+          });
         } else if (
           data.type === 'channel-clear' &&
           typeof data.channelId === 'string'
@@ -153,6 +183,7 @@ export function initChatSync() {
 
     ws.onclose = () => {
       registerWsSend(null);
+      if (url) setNpcPausedForWs(false);
       reconnectTimer = setTimeout(connect, 2500);
     };
 
