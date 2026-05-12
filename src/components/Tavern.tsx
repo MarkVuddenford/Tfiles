@@ -1,6 +1,12 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useStore, Account, getPlayerRoleBySentMessages } from '../store';
+import {
+  useStore,
+  Account,
+  getPlayerRoleBySentMessages,
+  getEffectiveSentMessagesCount,
+  getEffectiveMutedUntil,
+} from '../store';
 import PlayerProfile from './PlayerProfile';
 
 interface Props {
@@ -12,7 +18,7 @@ export default function Tavern({ currentUser }: Props) {
     messages, friendRequests, orders,
     sendMessage, sendFriendRequest,
     acceptFriendRequest, rejectFriendRequest, removeFriend,
-    getFriends, activeChannel, setActiveChannel, markChannelRead, lastReadAtByChannel, accounts,
+    getFriends, activeChannel, setActiveChannel, markChannelRead,     lastReadAtByChannel, accounts, serverAccountMeta,
   } = useStore(useShallow(s => ({
     messages: s.messages,
     friendRequests: s.friendRequests,
@@ -28,6 +34,7 @@ export default function Tavern({ currentUser }: Props) {
     markChannelRead: s.markChannelRead,
     lastReadAtByChannel: s.lastReadAtByChannel,
     accounts: s.accounts,
+    serverAccountMeta: s.serverAccountMeta,
   })));
 
   const [text, setText] = useState('');
@@ -45,7 +52,7 @@ export default function Tavern({ currentUser }: Props) {
   const friends = useMemo(() => {
     const list = getFriends(currentUser.id);
     return [...list].sort((a, b) => a.username.localeCompare(b.username, 'ru'));
-  }, [getFriends, friendRequests, accounts, currentUser.id]);
+  }, [getFriends, friendRequests, accounts, currentUser.id, serverAccountMeta]);
 
   const pendingRequests = friendRequests.filter(
     r => r.toId === currentUser.id && r.status === 'pending'
@@ -96,7 +103,13 @@ export default function Tavern({ currentUser }: Props) {
   }, [friends, orders, currentUser.id, messages]);
 
   const channelMessages = messages.filter(m => m.channelId === activeChannel);
-  const muteLeftMs = Math.max(0, (currentUser.mutedUntil ?? 0) - Date.now());
+  const muteEffectiveUntil = useStore(s =>
+    Math.max(
+      s.accounts.find(a => a.id === currentUser.id)?.mutedUntil ?? 0,
+      s.serverAccountMeta[currentUser.id]?.mutedUntil ?? 0,
+    ),
+  );
+  const muteLeftMs = Math.max(0, muteEffectiveUntil - Date.now());
   const isMuted = muteLeftMs > 0;
 
   useEffect(() => {
@@ -259,8 +272,8 @@ export default function Tavern({ currentUser }: Props) {
                   )}
                   <span className="friend-name">
                     {freshF.username}{' '}
-                    <span className={`role-pill role-pill-${getPlayerRoleBySentMessages(freshF.sentMessagesCount ?? 0).id}`}>
-                      {getPlayerRoleBySentMessages(freshF.sentMessagesCount ?? 0).label}
+                    <span className={`role-pill role-pill-${getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(freshF.id)).id}`}>
+                      {getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(freshF.id)).label}
                     </span>
                   </span>
                 </div>
@@ -287,9 +300,9 @@ export default function Tavern({ currentUser }: Props) {
             <span className="self-username">
               {currentUser.username}{' '}
               <span
-                className={`role-pill role-pill-${getPlayerRoleBySentMessages(currentUser.sentMessagesCount ?? 0).id}`}
+                className={`role-pill role-pill-${getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(currentUser.id)).id}`}
               >
-                {getPlayerRoleBySentMessages(currentUser.sentMessagesCount ?? 0).label}
+                {getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(currentUser.id)).label}
               </span>
             </span>
             <span className="self-edit-hint">✏️</span>
@@ -318,6 +331,7 @@ export default function Tavern({ currentUser }: Props) {
         <div className="messages-container">
           {channelMessages.map(msg => {
             const msgAccount = getAccount(msg.authorId);
+            const authorRoleCount = getEffectiveSentMessagesCount(msg.authorId);
             const isOwn = msg.authorId === currentUser.id;
 
             return (
@@ -345,9 +359,9 @@ export default function Tavern({ currentUser }: Props) {
                     <span className={`msg-author ${msg.isNPC ? 'npc-author' : isOwn ? 'own-author' : ''}`}>
                       {msg.authorName}
                     </span>
-                    {!msg.isNPC && msgAccount && (
-                      <span className={`role-pill role-pill-${getPlayerRoleBySentMessages(msgAccount.sentMessagesCount ?? 0).id}`}>
-                        {getPlayerRoleBySentMessages(msgAccount.sentMessagesCount ?? 0).label}
+                    {!msg.isNPC && (
+                      <span className={`role-pill role-pill-${getPlayerRoleBySentMessages(authorRoleCount).id}`}>
+                        {getPlayerRoleBySentMessages(authorRoleCount).label}
                       </span>
                     )}
                     {msg.isNPC && <span className="npc-tag">NPC</span>}
@@ -412,7 +426,7 @@ export default function Tavern({ currentUser }: Props) {
               className="mc-input chat-input"
               placeholder={
                 isMuted
-                  ? `Мут до ${new Date(currentUser.mutedUntil ?? 0).toLocaleTimeString('ru-RU')}`
+                  ? `Мут до ${new Date(getEffectiveMutedUntil(currentUser.id)).toLocaleTimeString('ru-RU')}`
                   : `Пиши в ${channels.find(c => c.id === activeChannel)?.name || 'канал'}...`
               }
               value={text}
@@ -441,9 +455,9 @@ export default function Tavern({ currentUser }: Props) {
             )}
             <span className="ctx-username">{contextMenu.targetUser.username}</span>
             <span
-              className={`role-pill role-pill-${getPlayerRoleBySentMessages(contextMenu.targetUser.sentMessagesCount ?? 0).id}`}
+              className={`role-pill role-pill-${getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(contextMenu.targetUser.id)).id}`}
             >
-              {getPlayerRoleBySentMessages(contextMenu.targetUser.sentMessagesCount ?? 0).label}
+              {getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(contextMenu.targetUser.id)).label}
             </span>
           </div>
 
