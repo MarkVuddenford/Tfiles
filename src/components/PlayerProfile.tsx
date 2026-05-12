@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { useStore, Account, getPlayerRoleBySentMessages } from '../store';
+import { useState, useRef, useMemo } from 'react';
+import { useStore, Account, getPlayerRoleBySentMessages, getEffectiveSentMessagesCount } from '../store';
 
 interface Props {
   profileUser: Account;
@@ -25,6 +25,7 @@ export default function PlayerProfile({ profileUser, currentUser, onClose }: Pro
   );
 
   const freshProfile = useStore(s => s.accounts.find(a => a.id === profileUser.id)) || profileUser;
+  const profileSrvPatch = useStore(s => s.serverAccountMeta[profileUser.id]);
 
   const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -64,7 +65,11 @@ export default function PlayerProfile({ profileUser, currentUser, onClose }: Pro
   const formatDate = (ts: number) =>
     new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
 
-  const role = getPlayerRoleBySentMessages(freshProfile.sentMessagesCount ?? 0);
+  const roleCount = useMemo(
+    () => getEffectiveSentMessagesCount(profileUser.id),
+    [profileUser.id, profileSrvPatch, freshProfile.sentMessagesCount],
+  );
+  const role = getPlayerRoleBySentMessages(roleCount);
 
   return (
     <div className="profile-overlay" onClick={onClose}>
