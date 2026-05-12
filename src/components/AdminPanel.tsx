@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { getPlayerRoleBySentMessages, useStore } from '../store';
+import { getEffectiveSentMessagesCount, getPlayerRoleBySentMessages, useStore } from '../store';
 
 interface Props {
   onExit: () => void;
@@ -486,16 +486,16 @@ export default function AdminPanel({ onExit }: Props) {
                   <span className="acc-avatar">{a.avatar}</span>
                   <div className="acc-info">
                     <span className="acc-name">{a.username}</span>
-                    <span className="acc-pass">Сообщений: {a.sentMessagesCount ?? 0}</span>
+                    <span className="acc-pass">Сообщений: {getEffectiveSentMessagesCount(a.id)}</span>
                     <span className="acc-pass">
-                      Роль: {getPlayerRoleBySentMessages(a.sentMessagesCount ?? 0).label}
+                      Роль: {getPlayerRoleBySentMessages(getEffectiveSentMessagesCount(a.id)).label}
                     </span>
                   </div>
                   <button
                     className="mc-btn mc-btn-secondary small"
                     onClick={() => {
                       setRoleAccountId(a.id);
-                      setRoleCountInput(String(a.sentMessagesCount ?? 0));
+                      setRoleCountInput(String(getEffectiveSentMessagesCount(a.id)));
                     }}
                   >
                     РЕДАКТ.
