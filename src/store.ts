@@ -89,6 +89,11 @@ interface AppStore {
   npcBotEnabled: boolean;
   npcIntervalMinMs: number;
   npcIntervalMaxMs: number;
+  /** Патчи с WS-сервера (роль/модерация), в т.ч. для аккаунтов с других устройств. */
+  serverAccountMeta: Record<
+    string,
+    Partial<Pick<Account, 'sentMessagesCount' | 'mutedUntil' | 'bannedUntil' | 'banReason'>>
+  >;
 
   login: (username: string, password: string, rememberMe?: boolean) => boolean;
   logout: () => void;
@@ -223,12 +228,92 @@ const NPC_MESSAGES = [
 ];
 
 let npcInterval: ReturnType<typeof setTimeout> | null = null;
+/** Пока true — локальный NPC не шедулится (бот ведёт chat-server при подключении по WS). */
+let npcPausedForWs = false;
 
 /** Синхронизация с chat-server (сообщения, заявки в друзья). */
 let wsSend: ((payload: Record<string, unknown>) => void) | null = null;
 
 export function registerWsSend(fn: ((payload: Record<string, unknown>) => void) | null) {
   wsSend = fn;
+}
+
+/** Вызывается из chatSync: есть URL WS — локальный NPC отключён, пока есть соединение. */
+export function setNpcPausedForWs(paused: boolean) {
+  npcPausedForWs = paused;
+  clearNpcSchedule();
+  scheduleNextNpc();
+}
+
+/** Роль «как видят все»: max(локально, патч сервера). Патчи приходят с хостингового relay. */
+export function getEffectiveSentMessagesCount(userId: string): number {
+  const s = useStore.getState();
+  const local = s.accounts.find(a => a.id === userId)?.sentMessagesCount ?? 0;
+  const remote = s.serverAccountMeta[userId]?.sentMessagesCount;
+  if (typeof remote === 'number') return Math.max(remote, local);
+  return local;
+}
+
+export function getEffectiveMutedUntil(userId: string): number {
+  const s = useStore.getState();
+  const local = s.accounts.find(a => a.id === userId)?.mutedUntil ?? 0;
+  const remote = s.serverAccountMeta[userId]?.mutedUntil ?? 0;
+  return Math.max(local, remote);
+}
+
+export function effectiveBannedUntil(userId: string): number {
+  const s = useStore.getState();
+  const local = s.accounts.find(a => a.id === userId)?.bannedUntil ?? 0;
+  const remote = s.serverAccountMeta[userId]?.bannedUntil ?? 0;
+  return Math.max(local, remote);
+}
+
+function pickAccountMergeFromServerPatch(
+  acc: Account,
+  p: Partial<Pick<Account, 'sentMessagesCount' | 'mutedUntil' | 'bannedUntil' | 'banReason'>>
+): Account {
+  const out = { ...acc };
+  if ('mutedUntil' in p && typeof p.mutedUntil === 'number') out.mutedUntil = p.mutedUntil;
+  if ('bannedUntil' in p && typeof p.bannedUntil === 'number') out.bannedUntil = p.bannedUntil;
+  if ('banReason' in p && typeof p.banReason === 'string') out.banReason = p.banReason;
+  if ('sentMessagesCount' in p && typeof p.sentMessagesCount === 'number') {
+    out.sentMessagesCount = Math.max(p.sentMessagesCount, acc.sentMessagesCount ?? 0);
+  }
+  return out;
+}
+
+/** Полный список патчей с сервера (snapshot). */
+export function replaceServerAccountMeta(
+  patches: Record<string, Partial<Pick<Account, 'sentMessagesCount' | 'mutedUntil' | 'bannedUntil' | 'banReason'>>>
+) {
+  useStore.setState(s => {
+    const serverAccountMeta = { ...patches };
+    const applyTo = (a: Account) => {
+      const p = patches[a.id];
+      return p ? pickAccountMergeFromServerPatch(a, p) : a;
+    };
+    return {
+      serverAccountMeta,
+      accounts: s.accounts.map(applyTo),
+      currentUser: s.currentUser ? applyTo(s.currentUser) : null,
+    };
+  });
+}
+
+/** Тексты NPC и интервалы с сервера (snapshot или broadcast). */
+export function applyRemoteNpcBotConfig(
+  patch: Partial<{ npcBotEnabled: boolean; npcIntervalMinMs: number; npcIntervalMaxMs: number }>
+) {
+  useStore.setState(s => {
+    const enabled = patch.npcBotEnabled ?? s.npcBotEnabled;
+    let minMs = patch.npcIntervalMinMs ?? s.npcIntervalMinMs;
+    let maxMs = patch.npcIntervalMaxMs ?? s.npcIntervalMaxMs;
+    minMs = Math.max(3000, Math.min(minMs, 600_000));
+    maxMs = Math.max(minMs + 1000, Math.min(maxMs, 600_000));
+    return { npcBotEnabled: enabled, npcIntervalMinMs: minMs, npcIntervalMaxMs: maxMs };
+  });
+  clearNpcSchedule();
+  scheduleNextNpc();
 }
 
 export const useStore = create<AppStore>()(
@@ -248,6 +333,7 @@ export const useStore = create<AppStore>()(
       npcBotEnabled: true,
       npcIntervalMinMs: 15000,
       npcIntervalMaxMs: 45000,
+      serverAccountMeta: {},
 
       login: (username, password, rememberMe) => {
         const acc = get().accounts.find(a => a.username === username && a.password === password);
@@ -274,6 +360,13 @@ export const useStore = create<AppStore>()(
           maxMs = Math.max(minMs + 1000, Math.min(maxMs, 600_000));
           return { npcBotEnabled: enabled, npcIntervalMinMs: minMs, npcIntervalMaxMs: maxMs };
         });
+        const st = get();
+        wsSend?.({
+          type: 'npc-bot-config',
+          npcBotEnabled: st.npcBotEnabled,
+          npcIntervalMinMs: st.npcIntervalMinMs,
+          npcIntervalMaxMs: st.npcIntervalMaxMs,
+        });
         clearNpcSchedule();
         scheduleNextNpc();
       },
@@ -299,9 +392,7 @@ export const useStore = create<AppStore>()(
 
       sendMessage: (channelId, authorId, authorName, text, imageUrl, isNPC, authorAvatarUrl) => {
         if (!isNPC) {
-          const author = get().accounts.find(a => a.id === authorId);
-          const mutedUntil = author?.mutedUntil ?? 0;
-          if (mutedUntil > Date.now()) return;
+          if (getEffectiveMutedUntil(authorId) > Date.now()) return;
         }
         const msg: ChatMessage = {
           id: uuidv4(),
@@ -468,6 +559,10 @@ export const useStore = create<AppStore>()(
         set(s => ({
           accounts: s.accounts.map(a => (a.id === userId ? { ...a, sentMessagesCount: safe } : a)),
           currentUser: s.currentUser?.id === userId ? { ...s.currentUser, sentMessagesCount: safe } : s.currentUser,
+          serverAccountMeta: {
+            ...s.serverAccountMeta,
+            [userId]: { ...s.serverAccountMeta[userId], sentMessagesCount: safe },
+          },
         }));
         wsSend?.({ type: 'account-stats', userId, sentMessagesCount: safe });
       },
@@ -481,6 +576,10 @@ export const useStore = create<AppStore>()(
         set(s => ({
           accounts: s.accounts.map(a => (a.id === userId ? { ...a, ...normalized } : a)),
           currentUser: s.currentUser?.id === userId ? { ...s.currentUser, ...normalized } : s.currentUser,
+          serverAccountMeta: {
+            ...s.serverAccountMeta,
+            [userId]: { ...s.serverAccountMeta[userId], ...normalized },
+          },
         }));
         wsSend?.({ type: 'account-moderation', userId, patch: normalized });
       },
@@ -557,6 +656,7 @@ function clearNpcSchedule() {
 
 function scheduleNextNpc() {
   clearNpcSchedule();
+  if (npcPausedForWs) return;
   const state = useStore.getState();
   if (!state.npcBotEnabled) return;
   const span = Math.max(1000, state.npcIntervalMaxMs - state.npcIntervalMinMs);
@@ -569,6 +669,7 @@ function scheduleNextNpc() {
 }
 
 export function startNPCMessages() {
+  if (npcPausedForWs) return;
   const store = useStore.getState();
   if (store.npcBotEnabled) {
     const existing = store.messages.filter(m => m.channelId === 'main' && m.isNPC);
@@ -750,6 +851,10 @@ export function applyRemoteModeration(
   useStore.setState(s => ({
     accounts: s.accounts.map(a => (a.id === userId ? { ...a, ...patch } : a)),
     currentUser: s.currentUser?.id === userId ? { ...s.currentUser, ...patch } : s.currentUser,
+    serverAccountMeta: {
+      ...s.serverAccountMeta,
+      [userId]: { ...s.serverAccountMeta[userId], ...patch },
+    },
   }));
 }
 
@@ -758,6 +863,10 @@ export function applyRemoteSentMessagesCount(userId: string, count: number) {
   useStore.setState(s => ({
     accounts: s.accounts.map(a => (a.id === userId ? { ...a, sentMessagesCount: safe } : a)),
     currentUser: s.currentUser?.id === userId ? { ...s.currentUser, sentMessagesCount: safe } : s.currentUser,
+    serverAccountMeta: {
+      ...s.serverAccountMeta,
+      [userId]: { ...s.serverAccountMeta[userId], sentMessagesCount: safe },
+    },
   }));
 }
 
