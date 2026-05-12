@@ -48,7 +48,7 @@ export default function Market() {
       </div>
 
       <div className="currency-legend">
-        <div className="legend-title">ВАЛЮТЫ ЛОРА:</div>
+        <div className="legend-title">ДОСТУПНЫЕ ВАЛЮТЫ:</div>
         {[
           { icon: '🟤', name: 'Медная монета', desc: 'наименьшая' },
           { icon: '⚙', name: 'Железная монета', desc: '' },
